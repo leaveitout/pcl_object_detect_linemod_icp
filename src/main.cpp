@@ -11,16 +11,14 @@
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/common/centroid.h>
 #include <pcl/common/transforms.h>
-#include <pcl/segmentation/extract_clusters.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/icp.h>
 #include <pcl/registration/icp_nl.h>
 
-#include <boost/range/irange.hpp>
 #include <boost/range/counting_range.hpp>
-#include <boost/smart_ptr/make_shared.hpp>
+#include <pcltools/fileio.hpp>
 
 
 #include "pcltools/segmentation.hpp"
@@ -35,16 +33,7 @@ using PointNormalType = pcl::PointXYZRGBNormal;
 namespace fs = boost::filesystem;
 
 
-// User defined literals
-// @formatter:off
-constexpr size_t operator "" _sz (unsigned long long size) { return size_t{size}; }
-constexpr double operator "" _deg (long double deg) { return deg * M_PI / 180.0; }
-constexpr double operator "" _deg (unsigned long long deg) { return deg * M_PI / 180.0; }
-constexpr double operator "" _cm (long double cm) { return cm / 100.0; }
-constexpr double operator "" _cm (unsigned long long cm) { return cm / 100.0; }
-constexpr double operator "" _mm (long double mm) { return mm / 1000.0; }
-constexpr double operator "" _mm (unsigned long long mm) { return mm / 1000.0; }
-// @formatter:on
+using namespace pcltools;
 
 
 // Constants
@@ -52,20 +41,7 @@ constexpr auto MIN_VALID_ARGS = 5U;
 constexpr auto MAX_VALID_ARGS = 5U;
 constexpr auto NUM_PCD_FILES_EXPECTED = 3U;
 constexpr auto NUM_LMT_FILES_EXPECTED = 1U;
-//constexpr auto NUM_PCD_DIRS_EXPECTED = 2U;
-//constexpr auto INPUT_DIR_ARG_POS = 1U;
-//constexpr auto OUTPUT_DIR_ARG_POS = 2U;
-constexpr auto DEFAULT_MIN_CLUSTER_SIZE = 100U;
-constexpr auto DEFAULT_MAX_CLUSTER_SIZE = 25000U;
-constexpr auto DEFAULT_TOLERANCE = 2_cm;
-constexpr auto DEFAULT_MAX_NUM_CLUSTERS = 20U;
 
-
-template <typename T>
-constexpr auto izrange (T upper)
--> decltype (boost::irange (static_cast<T> (0), upper)) {
-  return boost::irange (static_cast <T> (0), upper);
-}
 
 
 auto printHelp (int argc, char ** argv)
@@ -99,12 +75,6 @@ auto expandTilde (std::string path_string) -> fs::path {
   return fs::path{path_string};
 }
 
-
-auto checkValidFile (fs::path const & filepath)
--> bool {
-  // Check that the file is valid
-  return fs::exists (filepath) && fs::is_regular_file (filepath);
-}
 
 
 auto addNormals (pcl::PointCloud <PointType>::ConstPtr const & cloud)
@@ -207,54 +177,18 @@ auto getCentroidOrganisedRect (pcl::PointCloud <PointType>::ConstPtr const & clo
 }
 
 
-/**
- * Get the different indices for the different clusters that are present in a point cloud.
- */
-auto getClustersIndices (pcl::PointCloud <PointType>::ConstPtr const & input_cloud,
-                         unsigned min_cluster_size = DEFAULT_MIN_CLUSTER_SIZE,
-                         unsigned max_cluster_size = DEFAULT_MAX_CLUSTER_SIZE,
-                         double cluster_tolerance = DEFAULT_TOLERANCE,
-                         unsigned max_num_clusters = DEFAULT_MAX_NUM_CLUSTERS)
--> std::vector <pcl::PointIndices> {
-  auto tree = boost::make_shared <pcl::search::KdTree <PointType>> ();
-  tree->setInputCloud (input_cloud);
-
-  auto clusters = std::vector <pcl::PointIndices> {};
-  auto clusterer = pcl::EuclideanClusterExtraction <PointType> {};
-
-  clusterer.setClusterTolerance (cluster_tolerance);
-  clusterer.setMinClusterSize (min_cluster_size);
-  clusterer.setMaxClusterSize (max_cluster_size);
-  clusterer.setSearchMethod (tree);
-  clusterer.setInputCloud (input_cloud);
-  clusterer.extract (clusters);
-
-  auto larger_cluster_lambda = [] (pcl::PointIndices a, pcl::PointIndices b) {
-    return a.indices.size () >= b.indices.size ();
-  };
-  std::sort (clusters.begin (), clusters.end (), larger_cluster_lambda);
-
-  if (clusters.size () > max_num_clusters)
-    clusters.erase (clusters.begin () + max_num_clusters, clusters.end ());
-
-  return clusters;
-}
-
-
 auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
                 pcl::PointCloud <PointType>::Ptr const & target_cloud,
-                bool downsample = false)
+                double max_correspondence_distance = 0.01,
+                bool downsample = false,
+                double leaf_size = 0.01)
 -> Eigen::Matrix4f {
-  //    -> std::pair<pcl::PointCloud<PointType>::Ptr, Eigen::Matrix4f> {
-  auto output = boost::make_shared <pcl::PointCloud <PointType>> ();
-  auto final_transform = Eigen::Matrix4f {};
-
   // Downsample for consistency and speed, enable this for large datasets
   auto source = boost::make_shared <Cloud> ();
   auto target = boost::make_shared <Cloud> ();
   auto grid = pcl::VoxelGrid <PointType>{};
   if (downsample) {
-    grid.setLeafSize (0.01, 0.01, 0.01);
+    grid.setLeafSize (leaf_size, leaf_size, leaf_size);
     grid.setInputCloud (source_cloud);
     grid.filter (*source);
 
@@ -266,10 +200,6 @@ auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
     target = target_cloud;
   }
 
-  std::cout << source->size () << std::endl;
-  std::cout << target->size () << std::endl;
-
-
   // Compute surface normals and curvature
   auto points_with_normals_src = addNormals (source);
   auto points_with_normals_tgt = addNormals (target);
@@ -277,10 +207,10 @@ auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
   // Align
   auto reg = pcl::IterativeClosestPointWithNormals <PointNormalType, PointNormalType> {};
   reg.setTransformationEpsilon (1e-6);
-  // Set the maximum distance between two correspondences (src<->tgt) to 10cm
+  // Set the maximum distance between two correspondences (src<->tgt) to 1cm
   // Note: adjust this based on the size of your datasets
   //  reg.setMaxCorrespondenceDistance (0.10);
-  reg.setMaxCorrespondenceDistance (0.01);
+  reg.setMaxCorrespondenceDistance (max_correspondence_distance);
 
   reg.setInputSource (points_with_normals_src);
   reg.setInputTarget (points_with_normals_tgt);
@@ -288,8 +218,6 @@ auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
   // Run the same optimization in a loop and visualize the results
   auto prev = Eigen::Matrix4f {};
   auto Ti = Eigen::Matrix4f {Eigen::Matrix4f::Identity ()};
-  //  auto prev = Eigen::Matrix4f::Identity ();
-  //  auto targetToSource = Eigen::Matrix4f::Identity ();
   auto reg_result = points_with_normals_src;
   reg.setMaximumIterations (2);
   for (int i = 0; i < 40; ++i) {
@@ -316,13 +244,8 @@ auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
     prev = reg.getLastIncrementalTransformation ();
   }
 
-  //add the source to the transformed target
-  *output += *source_cloud;
-
-  final_transform = Ti;
-
-  return final_transform;
-  //  return std::make_pair (output, final_transform);
+  // Final transformation
+  return Ti;
 }
 
 
@@ -356,11 +279,11 @@ auto getCentroidTransform (pcl::PointCloud <PointType>::ConstPtr const & cloud,
 auto getClosestCluster (pcl::PointCloud <PointType>::ConstPtr const & cloud,
                         Eigen::Vector4d const & point)
 -> pcl::PointCloud <PointType>::Ptr {
-  auto clusters = getClustersIndices (cloud,
-                                      DEFAULT_MIN_CLUSTER_SIZE,
-                                      DEFAULT_MAX_CLUSTER_SIZE,
-                                      DEFAULT_TOLERANCE,
-                                      5);
+  auto clusters = seg::getClustersIndices <PointType> (cloud,
+                                                       seg::DEFAULT_MIN_CLUSTER_SIZE,
+                                                       seg::DEFAULT_MAX_CLUSTER_SIZE,
+                                                       seg::DEFAULT_CLUSTER_TOLERANCE,
+                                                       5);
   auto cluster_centroids = std::vector <Eigen::Vector4d,
                                         Eigen::aligned_allocator <Eigen::Vector4d>> {};
 
@@ -379,7 +302,7 @@ auto getClosestCluster (pcl::PointCloud <PointType>::ConstPtr const & cloud,
   auto min_idx = min_iter - cluster_centroids.begin ();
 
   auto indices_ptr = boost::make_shared <pcl::PointIndices> (clusters.at (min_idx));
-  auto object_cluster_cloud = pcltools::seg::extractIndices <PointType> (cloud, indices_ptr);
+  auto object_cluster_cloud = seg::extractIndices <PointType> (cloud, indices_ptr);
 
   return object_cluster_cloud;
 }
@@ -419,15 +342,15 @@ auto main (int argc, char * argv[])
   auto center_pcd_file = fs::path {argv[pcd_arg_indices.at (1)]};
   auto object_pcd_file = fs::path {argv[pcd_arg_indices.at (2)]};
 
-  if (!checkValidFile (lmt_file)) {
+  if (!fileio::checkValidFile (lmt_file)) {
     pcl::console::print_error ("A valid lmt file was not specified.\n");
     printHelp (argc, argv);
     return -1;
   }
 
-  auto valid_merged = checkValidFile (merged_pcd_file);
-  auto valid_center = checkValidFile (center_pcd_file);
-  auto valid_object = checkValidFile (object_pcd_file);
+  auto valid_merged = fileio::checkValidFile (merged_pcd_file);
+  auto valid_center = fileio::checkValidFile (center_pcd_file);
+  auto valid_object = fileio::checkValidFile (object_pcd_file);
   auto all_valid_pcd_files = valid_merged && valid_center && valid_object;
   if (!all_valid_pcd_files) {
     pcl::console::print_error ("Not all pcd files specified were valid.\n");
