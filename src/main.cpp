@@ -23,6 +23,9 @@
 #include <boost/smart_ptr/make_shared.hpp>
 
 
+#include "pcltools/segmentation.hpp"
+
+
 // Typedefs
 using PointType = pcl::PointXYZRGBA;
 using Cloud = pcl::PointCloud <PointType>;
@@ -101,23 +104,6 @@ auto checkValidFile (fs::path const & filepath)
 -> bool {
   // Check that the file is valid
   return fs::exists (filepath) && fs::is_regular_file (filepath);
-}
-
-
-auto extractIndices (pcl::PointCloud <PointType>::ConstPtr const & cloud,
-                     pcl::PointIndicesPtr indices,
-                     bool keep_organised = false,
-                     bool negative = false)
--> Cloud::Ptr {
-  auto extract = pcl::ExtractIndices <PointType>{};
-  extract.setInputCloud (cloud);
-  extract.setIndices (indices);
-  if (cloud->isOrganized ())
-    extract.setKeepOrganized (keep_organised);
-  extract.setNegative (negative);
-  auto extracted_cloud = boost::make_shared <Cloud> ();
-  extract.filter (*extracted_cloud);
-  return extracted_cloud;
 }
 
 
@@ -364,6 +350,41 @@ auto getCentroidTransform (pcl::PointCloud <PointType>::ConstPtr const & cloud,
 }
 
 
+/**
+ * Find the closest cluster in a cloud to a specific point and return the extracted cluster.
+ */
+auto getClosestCluster (pcl::PointCloud <PointType>::ConstPtr const & cloud,
+                        Eigen::Vector4d const & point)
+-> pcl::PointCloud <PointType>::Ptr {
+  auto clusters = getClustersIndices (cloud,
+                                      DEFAULT_MIN_CLUSTER_SIZE,
+                                      DEFAULT_MAX_CLUSTER_SIZE,
+                                      DEFAULT_TOLERANCE,
+                                      5);
+  auto cluster_centroids = std::vector <Eigen::Vector4d,
+                                        Eigen::aligned_allocator <Eigen::Vector4d>> {};
+
+  // Compute the centroids for each cluster
+  for (auto const & cluster : clusters) {
+    auto current_cluster_centroid = Eigen::Vector4d {};
+    pcl::compute3DCentroid (*cloud, cluster, current_cluster_centroid);
+    cluster_centroids.push_back (current_cluster_centroid);
+    std::cout << "Centroid :\n" << current_cluster_centroid << std::endl;
+  }
+
+  auto min_dist = [&point] (Eigen::Vector4d const & left, Eigen::Vector4d const & right) {
+    return (left - point).norm () < (right - point).norm ();
+  };
+  auto min_iter = std::min_element (cluster_centroids.begin (), cluster_centroids.end (), min_dist);
+  auto min_idx = min_iter - cluster_centroids.begin ();
+
+  auto indices_ptr = boost::make_shared <pcl::PointIndices> (clusters.at (min_idx));
+  auto object_cluster_cloud = pcltools::seg::extractIndices <PointType> (cloud, indices_ptr);
+
+  return object_cluster_cloud;
+}
+
+
 auto main (int argc, char * argv[])
 -> int {
   pcl::console::print_highlight ("Tool to detect pose of object in a point cloud.\n");
@@ -468,9 +489,11 @@ auto main (int argc, char * argv[])
   auto x2 = x1 + multi_mod_template.region.width;
   auto y2 = y1 + multi_mod_template.region.height;
 
-  auto centroid = getCentroidOrganisedRect (center_cloud, x1, y1, x2, y2);
+  // TODO: Remove table from the center_cloud to remove table points from centroid calculation
 
-  std::cout << "Centroid of linemod detection region: \n" << centroid << std::endl;
+  auto linemod_region_centroid = getCentroidOrganisedRect (center_cloud, x1, y1, x2, y2);
+
+  std::cout << "Centroid of linemod detection region: \n" << linemod_region_centroid << std::endl;
   auto image_extractor = pcl::io::PointCloudImageExtractorFromRGBField <pcl::PointXYZRGBA> {};
   auto image = boost::make_shared <pcl::PCLImage> ();
   auto extracted = image_extractor.extract (*center_cloud, *image);
@@ -491,36 +514,6 @@ auto main (int argc, char * argv[])
   image_viewer->addRGBImage (image_data, image->width, image->height);
   image_viewer->spin ();
 
-  auto clusters = getClustersIndices (merged_cloud,
-                                      DEFAULT_MIN_CLUSTER_SIZE,
-                                      DEFAULT_MAX_CLUSTER_SIZE,
-                                      DEFAULT_TOLERANCE,
-                                      5);
-
-  auto cluster_centroids = std::vector <Eigen::Vector4d,
-                                        Eigen::aligned_allocator <Eigen::Vector4d>> {};
-
-  // Compute the centroids for each cluster
-  for (auto const & cluster : clusters) {
-    auto current_cluster_centroid = Eigen::Vector4d {};
-    pcl::compute3DCentroid (*merged_cloud, cluster, current_cluster_centroid);
-    cluster_centroids.push_back (current_cluster_centroid);
-    std::cout << "Centroid :\n" << current_cluster_centroid << std::endl;
-  }
-
-  //  auto centroid_diffs = std::vector <Eigen::Vector4d> {};
-
-  auto min_dist = [&centroid] (Eigen::Vector4d const & left, Eigen::Vector4d const & right) {
-    return (left - centroid).norm () < (right - centroid).norm ();
-  };
-  auto min_iter = std::min_element (cluster_centroids.begin (), cluster_centroids.end (), min_dist);
-  auto min_idx = min_iter - cluster_centroids.begin ();
-
-  auto indices_ptr = boost::make_shared <pcl::PointIndices> (clusters.at (min_idx));
-  auto object_cluster_cloud = extractIndices (merged_cloud, indices_ptr);
-
-  std::cout << "Min idx: " << min_idx << std::endl;
-
   auto cloud_viz = std::make_shared <pcl::visualization::PCLVisualizer> ("Cloud Viewer");
   cloud_viz->initCameraParameters ();
 
@@ -528,7 +521,6 @@ auto main (int argc, char * argv[])
   cloud_viz->getCameraParameters (camera);
   camera.view[1] *= -1;
   cloud_viz->setCameraParameters (camera);
-
 
   // Rotate the object about the x axis so that it is upright w.r.t. camera
   auto rotate_about_x = Eigen::Matrix4f {};
@@ -539,22 +531,22 @@ auto main (int argc, char * argv[])
       0.0, 0.0, 0.0, 1.0;
   pcl::transformPointCloud (*object_cloud, *object_cloud, rotate_about_x);
 
-  auto centroid_transform = getCentroidTransform (object_cloud, centroid);
+  auto centroid_transform = getCentroidTransform (object_cloud, linemod_region_centroid);
   pcl::transformPointCloud (*object_cloud, *object_cloud, centroid_transform);
+
+  auto object_cluster_cloud = getClosestCluster (merged_cloud, linemod_region_centroid);
 
   auto icp_transform = pairAlign (object_cloud, object_cluster_cloud);
   pcl::transformPointCloud (*object_cloud, *object_cloud, icp_transform);
   auto red_color_handler = pcl::visualization::PointCloudColorHandlerCustom <PointType>
       {object_cloud, 255, 0, 0};
   cloud_viz->addPointCloud <PointType> (merged_cloud);
-//  cloud_viz->addPointCloud <PointType> (object_cloud, red_color_handler, "object");
 
-
-  std::cout << "ICP Transform : \n" << icp_transform << std::endl;
-  std::cout << "Centroid Transform : \n" << centroid_transform << std::endl;
   std::cout << "Rotate Transform : \n" << rotate_about_x << std::endl;
+  std::cout << "Centroid Transform : \n" << centroid_transform << std::endl;
+  std::cout << "ICP Transform : \n" << icp_transform << std::endl;
 
-  // TODO: Test this final transform, element (3,3) should be 1.0
+  // Validate that the transform is correct
   auto final_transform = Eigen::Matrix4f {icp_transform * centroid_transform * rotate_about_x};
 
   pcl::transformPointCloud (*object_cloud_copy, *object_cloud_copy, final_transform);

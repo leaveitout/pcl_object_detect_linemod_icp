@@ -14,7 +14,7 @@ add_definitions(${PCL_DEFINITIONS})
 
 include_directories(${CMAKE_HOME_DIRECTORY}/include)
 
-set(SOURCE_FILES src/main.cpp)
+set(SOURCE_FILES src/main.cpp src/pcltools/segmentation.cpp include/pcltools/segmentation.hpp)
 
 add_executable(pcl_object_detect_linemod ${SOURCE_FILES})
 
