@@ -20,6 +20,8 @@ auto checkValidFile (fs::path const & filepath) -> bool;
 
 auto checkValidDir (fs::path const & dirpath) -> bool;
 
+auto expandTilde (std::string path_string) -> fs::path;
+
 }
 }
 

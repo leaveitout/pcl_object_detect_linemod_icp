@@ -20,7 +20,6 @@
 #include <boost/range/counting_range.hpp>
 #include <pcltools/fileio.hpp>
 
-
 #include "pcltools/segmentation.hpp"
 
 
@@ -29,9 +28,7 @@ using PointType = pcl::PointXYZRGBA;
 using Cloud = pcl::PointCloud <PointType>;
 using PointNormalType = pcl::PointXYZRGBNormal;
 
-
 namespace fs = boost::filesystem;
-
 
 using namespace pcltools;
 
@@ -69,11 +66,6 @@ auto printHelp (int argc, char ** argv)
 }
 
 
-auto expandTilde (std::string path_string) -> fs::path {
-  if (path_string.at (0) == '~')
-    path_string.replace (0, 1, getenv ("HOME"));
-  return fs::path{path_string};
-}
 
 
 

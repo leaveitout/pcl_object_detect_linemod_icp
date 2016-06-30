@@ -9,6 +9,10 @@
 #include <pcl/PointIndices.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/segmentation/extract_clusters.h>
+#include <pcl/sample_consensus/ransac.h>
+#include <pcl/sample_consensus/sac_model_plane.h>
+#include <pcl/surface/convex_hull.h>
+#include <pcl/segmentation/extract_polygonal_prism_data.h>
 
 #include "pcltools/common.hpp"
 
@@ -58,6 +62,7 @@ constexpr auto DEFAULT_MAX_CLUSTER_SIZE = 2500U;
 constexpr auto DEFAULT_CLUSTER_TOLERANCE = 2_cm;
 constexpr auto DEFAULT_MAX_NUM_CLUSTERS = 20U;
 
+
 /**
  * Get the different indices for the different clusters that are present in a point cloud.
  */
@@ -92,6 +97,138 @@ auto getClustersIndices (typename pcl::PointCloud <PointType>::ConstPtr const & 
   return clusters;
 }
 
+
+constexpr auto PLANE_THRESHOLD_DEFAULT = 2_cm;
+constexpr auto MAX_SAC_ITERATIONS_DEFAULT = 1000;
+constexpr auto SAC_SIGMA_DEFAULT = 2.0;
+constexpr auto REFINE_ITERATIONS_DEFAULT = 50;
+
+
+template <typename PointType>
+auto getPlaneIndices (typename pcl::PointCloud <PointType>::ConstPtr const & cloud,
+                      double plane_thold = PLANE_THRESHOLD_DEFAULT,
+                      int max_iterations = MAX_SAC_ITERATIONS_DEFAULT,
+                      double refine_sigma = SAC_SIGMA_DEFAULT,
+                      int refine_iterations = REFINE_ITERATIONS_DEFAULT)
+-> pcl::PointIndicesPtr {
+  auto model = boost::make_shared <pcl::SampleConsensusModelPlane <PointType>> (cloud);
+  auto sac = pcl::RandomSampleConsensus <PointType>{model, plane_thold};
+  sac.setMaxIterations (max_iterations);
+  auto inliers_indices_ptr = boost::make_shared <pcl::PointIndices> ();
+  auto result = sac.computeModel ();
+  sac.getInliers (inliers_indices_ptr->indices);
+
+  if (!result || inliers_indices_ptr->indices.empty ()) {
+    pcl::console::print_error ("No planar model found, relax thresholds and continue.");
+    return nullptr;
+  }
+
+  sac.refineModel (refine_sigma, refine_iterations);
+
+  sac.getSampleConsensusModel ();
+  sac.getInliers (inliers_indices_ptr->indices);
+
+  return inliers_indices_ptr;
+}
+
+
+template <typename PointType>
+auto getTable (typename pcl::PointCloud <PointType>::ConstPtr const & cloud,
+               double plane_thold = PLANE_THRESHOLD_DEFAULT,
+               int max_iterations = MAX_SAC_ITERATIONS_DEFAULT,
+               double refine_sigma = SAC_SIGMA_DEFAULT,
+               int refine_iterations = REFINE_ITERATIONS_DEFAULT,
+               bool keep_organised = true)
+-> typename pcl::PointCloud <PointType>::Ptr {
+  auto point_indices = getPlaneIndices (cloud);
+
+  if (point_indices->indices.size () == 0) {
+    pcl::console::print_highlight ("No plane to be found in input pcd.\n");
+    return nullptr;
+  }
+
+  auto extracted_plane = extractIndices (cloud, point_indices, keep_organised);
+
+  auto largest_cluster_indices = getClustersIndices (extracted_plane).at (0);
+
+  return extractIndices (extracted_plane, largest_cluster_indices, keep_organised);
+}
+
+
+/**
+ * This function removes the table from cloud and returns the table as a cloud
+ */
+template <typename PointType>
+auto removeTable (typename pcl::PointCloud <PointType>::Ptr & cloud,
+                  double plane_thold = PLANE_THRESHOLD_DEFAULT,
+                  int max_iterations = MAX_SAC_ITERATIONS_DEFAULT,
+                  double refine_sigma = SAC_SIGMA_DEFAULT,
+                  int refine_iterations = REFINE_ITERATIONS_DEFAULT)
+-> typename pcl::PointCloud <PointType>::Ptr {
+  auto point_indices = getPlaneIndices (cloud);
+
+  if (point_indices->indices.size () == 0) {
+    pcl::console::print_highlight ("No plane to be found in input cloud.\n");
+    return nullptr;
+  }
+
+  auto extracted_plane = extractIndices (cloud, point_indices);
+
+  auto largest_cluster_indices = getClustersIndices (extracted_plane).at (0);
+
+  cloud = extractIndices (cloud, point_indices, true);
+
+  return extractIndices (extracted_plane, largest_cluster_indices);
+}
+
+
+template <typename PointType>
+auto getTableConvexHull (typename pcl::PointCloud <PointType>::ConstPtr const & table_cloud)
+-> typename pcl::PointCloud <PointType>::Ptr {
+  auto hull = pcl::ConvexHull <PointType>{};
+  auto convex_hull_cloud = boost::make_shared <pcl::PointCloud <PointType>> ();
+
+  hull.setInputCloud (table_cloud);
+  hull.reconstruct (*convex_hull_cloud);
+
+  if (hull.getDimension () != 2 || convex_hull_cloud->size () == 0) {
+
+    pcl::console::print_error ("The input cloud does not represent a planar surface for hull.\n");
+    return nullptr;
+
+  } else {
+    return convex_hull_cloud;
+  }
+}
+
+
+constexpr auto MIN_HEIGHT_FROM_HULL_DEFAULT = 0.5_cm;
+constexpr auto MAX_HEIGHT_FROM_HULL_DEFAULT = 70_cm;
+
+
+template <typename PointType>
+auto getPointsAboveConvexHull (typename pcl::PointCloud <PointType>::Ptr cloud,
+                               typename pcl::PointCloud <PointType>::Ptr convex_hull_cloud,
+                               double min_height = MIN_HEIGHT_FROM_HULL_DEFAULT,
+                               double max_height = MAX_HEIGHT_FROM_HULL_DEFAULT,
+                               bool keep_organised = true)
+-> typename pcl::PointCloud <PointType>::Ptr {
+  if (convex_hull_cloud) {
+    if (convex_hull_cloud->size () != 0) {
+      auto prism = pcl::ExtractPolygonalPrismData <PointType> {};
+      prism.setInputCloud (cloud);
+      prism.setInputPlanarHull (convex_hull_cloud);
+      prism.setHeightLimits (min_height, max_height);
+      auto indices_ptr = boost::make_shared <pcl::PointIndices> ();
+      prism.segment (*indices_ptr);
+      return extractIndices (cloud, indices_ptr, keep_organised);
+    }
+    else {
+      pcl::console::print_error ("The input cloud does not represent a planar surface for hull.\n");
+      return nullptr;
+    }
+  }
+}
 }
 }
 #endif //PCL_OBJECT_DETECT_LINEMOD_SEGMENTATION_HPP
