@@ -30,7 +30,7 @@ auto pcltools::fileio::checkValidDir (fs::path const & dirpath) -> bool {
 }
 
 
-auto expandTilde (std::string path_string) -> fs::path {
+auto pcltools::fileio::expandTilde (std::string path_string) -> fs::path {
   if (path_string.at (0) == '~')
     path_string.replace (0, 1, getenv ("HOME"));
   return fs::path{path_string};

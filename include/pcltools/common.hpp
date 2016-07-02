@@ -24,7 +24,7 @@ constexpr double operator "" _mm (unsigned long long mm) { return mm / 1000.0; }
 
 template <typename T>
 constexpr auto izrange (T upper)
--> decltype (boost::irange (static_cast<T> (0), upper)) {
+-> decltype (boost::irange (static_cast <T> (0), upper)) {
   return boost::irange (static_cast <T> (0), upper);
 }
 

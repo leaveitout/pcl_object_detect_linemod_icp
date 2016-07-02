@@ -66,9 +66,6 @@ auto printHelp (int argc, char ** argv)
 }
 
 
-
-
-
 auto addNormals (pcl::PointCloud <PointType>::ConstPtr const & cloud)
 -> pcl::PointCloud <PointNormalType>::Ptr {
   auto normal_cloud = boost::make_shared <pcl::PointCloud <pcl::Normal>> ();
@@ -171,15 +168,15 @@ auto getCentroidOrganisedRect (pcl::PointCloud <PointType>::ConstPtr const & clo
 
 auto pairAlign (pcl::PointCloud <PointType>::Ptr const & source_cloud,
                 pcl::PointCloud <PointType>::Ptr const & target_cloud,
-                double max_correspondence_distance = 0.01,
                 bool downsample = false,
-                double leaf_size = 0.01)
+                double leaf_size = 0.01,
+                double max_correspondence_distance = 0.01)
 -> Eigen::Matrix4f {
   // Downsample for consistency and speed, enable this for large datasets
   auto source = boost::make_shared <Cloud> ();
   auto target = boost::make_shared <Cloud> ();
-  auto grid = pcl::VoxelGrid <PointType>{};
   if (downsample) {
+    auto grid = pcl::VoxelGrid <PointType>{};
     grid.setLeafSize (leaf_size, leaf_size, leaf_size);
     grid.setInputCloud (source_cloud);
     grid.filter (*source);
@@ -404,11 +401,6 @@ auto main (int argc, char * argv[])
   auto x2 = x1 + multi_mod_template.region.width;
   auto y2 = y1 + multi_mod_template.region.height;
 
-  // TODO: Remove table from the center_cloud to remove table points from centroid calculation
-
-  auto linemod_region_centroid = getCentroidOrganisedRect (center_cloud, x1, y1, x2, y2);
-
-  std::cout << "Centroid of linemod detection region: \n" << linemod_region_centroid << std::endl;
   auto image_extractor = pcl::io::PointCloudImageExtractorFromRGBField <pcl::PointXYZRGBA> {};
   auto image = boost::make_shared <pcl::PCLImage> ();
   auto extracted = image_extractor.extract (*center_cloud, *image);
@@ -428,6 +420,13 @@ auto main (int argc, char * argv[])
   auto image_viewer = std::make_shared <pcl::visualization::ImageViewer> ("Image Viewer");
   image_viewer->addRGBImage (image_data, image->width, image->height);
   image_viewer->spin ();
+
+  // TODO: Remove table from the center_cloud to remove table points from centroid calculation
+  seg::removeTable <PointType> (center_cloud);
+
+  auto linemod_region_centroid = getCentroidOrganisedRect (center_cloud, x1, y1, x2, y2);
+
+  std::cout << "Centroid of linemod detection region: \n" << linemod_region_centroid << std::endl;
 
   auto cloud_viz = std::make_shared <pcl::visualization::PCLVisualizer> ("Cloud Viewer");
   cloud_viz->initCameraParameters ();
